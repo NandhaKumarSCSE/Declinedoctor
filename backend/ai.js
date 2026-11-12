@@ -1,4 +1,4 @@
-// Uses Google Gemini (free tier) via its REST API. No SDK needed.
+// Uses Google Gemini (free tier) via its REST API, with retries.
 function riskSignals(event, history) {
   const signals = [];
   const amt = parseFloat(event.amount || 0);
@@ -17,41 +17,61 @@ const SYSTEM =
   '"risk_level": "low"|"medium"|"high", "customer_message": string}. ' +
   "Use only the data given. Do not invent facts. Fraud signals are heuristic.";
 
-async function explainEvent(event, history) {
-  const signals = riskSignals(event, history);
-  const model = process.env.GEMINI_MODEL || "gemini-2.5-flash";
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+async function callGemini(model, payload) {
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
   const r = await fetch(url, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       "x-goog-api-key": process.env.GEMINI_API_KEY,
     },
-    body: JSON.stringify({
-      systemInstruction: { parts: [{ text: SYSTEM }] },
-      contents: [
-        {
-          role: "user",
-          parts: [
-            {
-              text: JSON.stringify({
-                event,
-                risk_signals: signals,
-                recent_history: history.slice(0, 5),
-              }),
-            },
-          ],
-        },
-      ],
-      generationConfig: { responseMimeType: "application/json", temperature: 0.3 },
-    }),
+    body: JSON.stringify(payload),
   });
-
   const data = await r.json();
-  if (!r.ok) throw new Error(data.error?.message || "Gemini request failed");
+  return { ok: r.ok, status: r.status, data };
+}
 
-  const text = (data.candidates?.[0]?.content?.parts || [])
+async function explainEvent(event, history) {
+  const signals = riskSignals(event, history);
+  const payload = {
+    systemInstruction: { parts: [{ text: SYSTEM }] },
+    contents: [
+      {
+        role: "user",
+        parts: [
+          {
+            text: JSON.stringify({
+              event,
+              risk_signals: signals,
+              recent_history: history.slice(0, 5),
+            }),
+          },
+        ],
+      },
+    ],
+    generationConfig: { responseMimeType: "application/json", temperature: 0.3 },
+  };
+
+  const models = [process.env.GEMINI_MODEL || "gemini-3.8-flash"];
+  if (process.env.GEMINI_FALLBACK_MODEL) models.push(process.env.GEMINI_FALLBACK_MODEL);
+
+  let result;
+  for (const model of models) {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      result = await callGemini(model, payload);
+      if (result.ok) break;
+      if (![429, 500, 503].includes(result.status)) break; // not retryable
+      await sleep(1500 * (attempt + 1));
+    }
+    if (result.ok) break;
+  }
+  if (!result.ok) {
+    throw new Error(result.data.error?.message || "Gemini request failed");
+  }
+
+  const text = (result.data.candidates?.[0]?.content?.parts || [])
     .map((p) => p.text || "")
     .join("")
     .replace(/```json|```/g, "")
