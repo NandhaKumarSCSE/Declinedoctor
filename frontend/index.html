@@ -51,7 +51,7 @@
 <body>
 <header>
   <h1>DeclineDoctor</h1>
-  <p>AI Payment Failure Explainer: PayPal sandbox events diagnosed by Claude</p>
+  <p>AI Payment Failure Explainer: PayPal sandbox events diagnosed by Gemini AI</p>
 </header>
 
 <main>
@@ -126,7 +126,7 @@ async function loadEvents() {
 async function explain(id, btn) {
   btn.disabled = true; btn.textContent = "Thinking...";
   $("explainHint").textContent = "";
-  $("explainBody").innerHTML = '<p class="note">Claude is analysing this event...</p>';
+  $("explainBody").innerHTML = '<p class="note">Gemini AI is analysing this event...</p>';
   try {
     const x = await api("/api/explain/" + encodeURIComponent(id), {});
     $("explainBody").innerHTML = `
