@@ -1,7 +1,4 @@
-const Anthropic = require("@anthropic-ai/sdk");
-const client = new Anthropic(); // reads ANTHROPIC_API_KEY from env
-
-// Heuristic risk signals computed in code, so the AI explains grounded data.
+// Uses Google Gemini (free tier) via its REST API. No SDK needed.
 function riskSignals(event, history) {
   const signals = [];
   const amt = parseFloat(event.amount || 0);
@@ -14,32 +11,52 @@ function riskSignals(event, history) {
   return signals;
 }
 
+const SYSTEM =
+  "You are a payments support analyst. Reply ONLY with JSON: " +
+  '{"summary": string, "likely_cause": string, "recommended_actions": string[], ' +
+  '"risk_level": "low"|"medium"|"high", "customer_message": string}. ' +
+  "Use only the data given. Do not invent facts. Fraud signals are heuristic.";
+
 async function explainEvent(event, history) {
   const signals = riskSignals(event, history);
-  const msg = await client.messages.create({
-    model: process.env.CLAUDE_MODEL || "claude-sonnet-5-5",
-    max_tokens: 700,
-    system:
-      "You are a payments support analyst. Reply ONLY with JSON, no markdown: " +
-      '{"summary": string, "likely_cause": string, "recommended_actions": string[], ' +
-      '"risk_level": "low"|"medium"|"high", "customer_message": string}. ' +
-      "Use only the data given. Do not invent facts. Fraud signals are heuristic.",
-    messages: [
-      {
-        role: "user",
-        content: JSON.stringify({
-          event,
-          risk_signals: signals,
-          recent_history: history.slice(0, 5),
-        }),
-      },
-    ],
+  const model = process.env.GEMINI_MODEL || "gemini-2.5-flash";
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
+
+  const r = await fetch(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-goog-api-key": process.env.GEMINI_API_KEY,
+    },
+    body: JSON.stringify({
+      systemInstruction: { parts: [{ text: SYSTEM }] },
+      contents: [
+        {
+          role: "user",
+          parts: [
+            {
+              text: JSON.stringify({
+                event,
+                risk_signals: signals,
+                recent_history: history.slice(0, 5),
+              }),
+            },
+          ],
+        },
+      ],
+      generationConfig: { responseMimeType: "application/json", temperature: 0.3 },
+    }),
   });
-  const text = msg.content
-    .map((b) => b.text || "")
+
+  const data = await r.json();
+  if (!r.ok) throw new Error(data.error?.message || "Gemini request failed");
+
+  const text = (data.candidates?.[0]?.content?.parts || [])
+    .map((p) => p.text || "")
     .join("")
     .replace(/```json|```/g, "")
     .trim();
+
   try {
     return { ...JSON.parse(text), risk_signals: signals };
   } catch {
