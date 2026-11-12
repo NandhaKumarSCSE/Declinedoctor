@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DeclineDoctor: AI Payment Failure Explainer</title>
+<style>
+  :root { --bg:#f6f8fb; --card:#fff; --text:#1c2733; --muted:#64748b; --line:#e2e8f0;
+          --green:#15803d; --red:#b91c1c; --yellow:#a16207; --blue:#1d4ed8; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#0f172a; --card:#1e293b; --text:#e2e8f0; --muted:#94a3b8; --line:#334155;
+            --green:#4ade80; --red:#f87171; --yellow:#facc15; --blue:#60a5fa; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family: system-ui, sans-serif; background:var(--bg); color:var(--text); }
+  header { padding:20px 24px; border-bottom:1px solid var(--line); background:var(--card); }
+  header h1 { margin:0; font-size:22px; }
+  header p { margin:4px 0 0; color:var(--muted); font-size:14px; }
+  main { max-width:1100px; margin:0 auto; padding:20px; display:grid; gap:20px;
+         grid-template-columns: 1fr 1fr; }
+  @media (max-width: 800px) { main { grid-template-columns: 1fr; } }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:18px; }
+  .card h2 { margin:0 0 12px; font-size:16px; }
+  .full { grid-column: 1 / -1; }
+  label { display:block; font-size:13px; color:var(--muted); margin:10px 0 4px; }
+  input, select { width:100%; padding:9px; border:1px solid var(--line); border-radius:8px;
+                  background:var(--bg); color:var(--text); font-size:14px; }
+  button { padding:9px 14px; border:0; border-radius:8px; background:var(--blue); color:#fff;
+           font-size:14px; cursor:pointer; }
+  button.secondary { background:transparent; color:var(--blue); border:1px solid var(--blue); }
+  button:disabled { opacity:.6; cursor:wait; }
+  .row { display:flex; gap:10px; margin-top:12px; flex-wrap:wrap; }
+  .note { font-size:12px; color:var(--muted); margin-top:10px; }
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  th, td { text-align:left; padding:8px; border-bottom:1px solid var(--line); }
+  th { color:var(--muted); font-weight:500; }
+  .wrap { overflow-x:auto; }
+  .badge { display:inline-block; padding:2px 9px; border-radius:99px; font-size:12px; font-weight:600;
+           border:1px solid currentColor; }
+  .COMPLETED { color:var(--green); } .FAILED { color:var(--red); }
+  .DISPUTE, .other { color:var(--yellow); }
+  .low { color:var(--green); } .medium { color:var(--yellow); } .high { color:var(--red); }
+  #explain h3 { margin:14px 0 4px; font-size:13px; color:var(--muted); font-weight:600; }
+  #explain p, #explain li { font-size:14px; margin:4px 0; }
+  .reply { background:var(--bg); border:1px solid var(--line); border-radius:8px; padding:10px;
+           white-space:pre-wrap; font-size:14px; }
+  #paypal-buttons { margin-top:14px; max-width:320px; }
+  .err { color:var(--red); font-size:13px; margin-top:8px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>DeclineDoctor</h1>
+  <p>AI Payment Failure Explainer: PayPal sandbox events diagnosed by Claude</p>
+</header>
+
+<main>
+  <section class="card">
+    <h2>1. Payment simulator (PayPal sandbox)</h2>
+    <label for="amount">Amount (USD)</label>
+    <input id="amount" type="number" min="1" step="0.01" value="25.00">
+    <label for="mock">Outcome</label>
+    <select id="mock">
+      <option value="">Real approval with PayPal button (success)</option>
+      <option value="INSTRUMENT_DECLINED">Simulate: INSTRUMENT_DECLINED</option>
+      <option value="TRANSACTION_REFUSED">Simulate: TRANSACTION_REFUSED</option>
+      <option value="PAYER_ACTION_REQUIRED">Simulate: PAYER_ACTION_REQUIRED</option>
+    </select>
+    <div class="row">
+      <button id="simBtn" class="secondary">Run simulated failure</button>
+    </div>
+    <div id="paypal-buttons"></div>
+    <div id="simErr" class="err"></div>
+    <p class="note">Pick a failure and click "Run simulated failure", or choose the first option and
+      pay with the PayPal button using a sandbox buyer account.</p>
+  </section>
+
+  <section class="card" id="explain">
+    <h2>2. AI explanation</h2>
+    <p class="note" id="explainHint">Click "Explain with AI" on any event below.</p>
+    <div id="explainBody"></div>
+  </section>
+
+  <section class="card full">
+    <h2>3. Live event feed</h2>
+    <div class="wrap">
+      <table>
+        <thead><tr><th>Time</th><th>ID</th><th>Status</th><th>Amount</th><th>Detail</th><th></th></tr></thead>
+        <tbody id="events"><tr><td colspan="6" class="note">No events yet.</td></tr></tbody>
+      </table>
+    </div>
+  </section>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
+  ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;" }[c]));
+
+async function api(path, body) {
+  const r = await fetch(path, body === undefined ? {} : {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(data.error || ("Request failed: " + r.status));
+  return data;
+}
+
+async function loadEvents() {
+  try {
+    const list = await api("/api/events");
+    $("events").innerHTML = list.length ? list.map((e) => `
+      <tr>
+        <td>${esc(new Date(e.time).toLocaleTimeString())}</td>
+        <td>${esc(String(e.id).slice(0, 14))}</td>
+        <td><span class="badge ${["COMPLETED","FAILED","DISPUTE"].includes(e.status) ? e.status : "other"}">${esc(e.status)}</span></td>
+        <td>${esc(e.amount ?? "-")}</td>
+        <td>${esc(e.errorName || e.eventType || "")}</td>
+        <td><button class="secondary" onclick="explain('${esc(e.id)}', this)">Explain with AI</button></td>
+      </tr>`).join("") : '<tr><td colspan="6" class="note">No events yet.</td></tr>';
+  } catch (err) { console.error(err); }
+}
+
+async function explain(id, btn) {
+  btn.disabled = true; btn.textContent = "Thinking...";
+  $("explainHint").textContent = "";
+  $("explainBody").innerHTML = '<p class="note">Claude is analysing this event...</p>';
+  try {
+    const x = await api("/api/explain/" + encodeURIComponent(id), {});
+    $("explainBody").innerHTML = `
+      <p><span class="badge ${esc(x.risk_level)}">Risk: ${esc(x.risk_level)}</span></p>
+      <h3>Summary</h3><p>${esc(x.summary)}</p>
+      <h3>Likely cause</h3><p>${esc(x.likely_cause)}</p>
+      <h3>Recommended actions</h3>
+      <ul>${(x.recommended_actions || []).map((a) => `<li>${esc(a)}</li>`).join("")}</ul>
+      ${x.risk_signals?.length ? `<h3>Risk signals (computed in code)</h3><ul>${x.risk_signals.map((s) => `<li>${esc(s)}</li>`).join("")}</ul>` : ""}
+      <h3>Draft customer reply</h3>
+      <div class="reply" id="replyText">${esc(x.customer_message)}</div>
+      <div class="row"><button class="secondary" onclick="navigator.clipboard.writeText($('replyText').textContent)">Copy reply</button></div>`;
+  } catch (err) {
+    $("explainBody").innerHTML = `<p class="err">${esc(err.message)}</p>`;
+  }
+  btn.disabled = false; btn.textContent = "Explain with AI";
+}
+
+// Simulated failure: create an order, then capture with PayPal's mock-response header
+$("simBtn").onclick = async () => {
+  const mock = $("mock").value;
+  $("simErr").textContent = "";
+  if (!mock) { $("simErr").textContent = "Choose a failure type, or pay with the PayPal button."; return; }
+  $("simBtn").disabled = true;
+  try {
+    const amount = $("amount").value;
+    const order = await api("/api/orders", { amount });
+    await api(`/api/orders/${order.id}/capture`, { mockCode: mock, amount });
+    await loadEvents();
+  } catch (err) { $("simErr").textContent = err.message; }
+  $("simBtn").disabled = false;
+};
+
+// Real PayPal Buttons (sandbox)
+async function initPayPal() {
+  try {
+    const { clientId } = await api("/api/config");
+    if (!clientId) { $("simErr").textContent = "Set PAYPAL_CLIENT_ID in .env"; return; }
+    const s = document.createElement("script");
+    s.src = `https://www.paypal.com/sdk/js?client-id=${encodeURIComponent(clientId)}&currency=USD`;
+    s.onload = () => {
+      paypal.Buttons({
+        createOrder: async () => (await api("/api/orders", { amount: $("amount").value })).id,
+        onApprove: async (data) => {
+          await api(`/api/orders/${data.orderID}/capture`, { amount: $("amount").value });
+          loadEvents();
+        },
+        onError: (err) => { $("simErr").textContent = "PayPal error: " + err; },
+      }).render("#paypal-buttons");
+    };
+    document.head.appendChild(s);
+  } catch (err) { $("simErr").textContent = err.message; }
+}
+
+initPayPal();
+loadEvents();
+setInterval(loadEvents, 5000);
+</script>
+</body>
+</html>
